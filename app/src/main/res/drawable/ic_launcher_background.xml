@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Background do icone adaptivo: gradiente violeta -> navy amostrado da
+     propria moldura da arte (canto sup-esquerdo -> canto inf-direito). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="135"
+        android:startColor="#B14BF5"
+        android:centerColor="#5A3390"
+        android:endColor="#05193A"
+        android:type="linear" />
+</shape>

@@ -1,0 +1,27 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/captures
+.externalNativeBuild
+.cxx
+
+# Builds (raiz E de cada modulo) + intermediaros
+build/
+.gradle/
+.kotlin/
+.cxx/
+
+# Dumps/artefatos locais de analise (ate 10 MB, nao versionar)
+/repomix-output.xml
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Segredos de assinatura: NUNCA versionar
+/keystore/
+/keystore.properties
+*.jks
+*.keystore
