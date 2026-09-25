@@ -10,7 +10,7 @@ offline, **tradução de páginas no próprio aparelho** (OCR + tradução) e um
 com busca real nas fontes instaladas.
 
 > Status: em desenvolvimento (`0.1.0`). Compilações prontas são publicadas na
-> aba **[Releases](https://github.com/SEU-USUARIO/Manga_Reader/releases)** — dá para instalar
+> aba **[Releases](https://github.com/idartificialtik-ops/Manga_Reader/releases)** — dá para instalar
 > direto, sem compilar nada.
 
 ---
@@ -136,10 +136,34 @@ cd Manga_Reader
 #   GRADLE_USER_HOME/gradle.properties  ->  org.gradle.java.home=/caminho/jdk-21
 
 ./gradlew assembleDebug        # APK debug
+./gradlew assembleRelease      # APK assinado (precisa de keystore.properties)
 ./gradlew installDebug         # instala no dispositivo conectado
 ```
 
-O APK sai em `app/build/outputs/apk/debug/app-debug.apk`.
+O APK sai em `app/build/outputs/apk/{debug,release}/`.
+
+### Assinatura (release)
+
+O build de release é assinado com a chave local. As credenciais ficam em
+**`keystore.properties`** (ignorado pelo git) apontando para a chave em `keystore/`:
+
+```properties
+storeFile=/caminho/para/manga-reader.jks
+storePassword=…
+keyAlias=manga-reader
+keyPassword=…
+```
+
+Para gerar a sua:
+
+```bash
+keytool -genkeypair -v -keystore manga-reader.jks -storetype PKCS12 \
+        -alias manga-reader -keyalg RSA -keysize 4096 -validity 10950
+```
+
+> Sem `keystore.properties` o build de release sai **sem assinatura** (o app ainda instala,
+> mas não atualiza por cima de uma versão assinada com outra chave). Guarde a chave: quem
+> perder a chave perde o direito de publicar atualizações do mesmo app.
 
 > Não versione `local.properties` (já está no `.gitignore`) — ele guarda o `sdk.dir` da sua máquina.
 
@@ -147,7 +171,7 @@ O APK sai em `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Instalação
 
-O APK já compilado fica na aba **[Releases](https://github.com/SEU-USUARIO/Manga_Reader/releases)**.
+O APK já compilado fica na aba **[Releases](https://github.com/idartificialtik-ops/Manga_Reader/releases)**.
 
 **No celular (Android 8+)**
 1. Baixe o `app-debug.apk` da release.
