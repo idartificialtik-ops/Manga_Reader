@@ -2,6 +2,8 @@ package dev.idart.mangareader.ui.manga
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -81,11 +83,11 @@ import androidx.core.net.toUri
 import coil3.BitmapImage
 import coil3.SingletonImageLoader
 import coil3.compose.SubcomposeAsyncImage
-import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import dev.idart.mangareader.source.model.SManga
 import dev.idart.mangareader.sources.download.ChapterDownloadState
 import dev.idart.mangareader.ui.components.MangaCover
+import dev.idart.mangareader.ui.components.coverImageRequest
 import dev.idart.mangareader.ui.injektViewModel
 import dev.idart.mangareader.ui.theme.MangaReaderTheme
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +95,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+
+/** Lado da miniatura usada só para contar cores: 64px já basta. */
+private const val PALETTE_SIZE_PX = 64
+
+private const val PALETTE_TAG = "CoverPalette"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,7 +130,7 @@ fun MangaDetailScreen(
 
     // Tema por capa (estilo Komikku): a cor extraída da capa regenera o
     // ColorScheme inteiro da tela — fundo, chips, botões, tudo.
-    val palette by coverPalette(state.manga?.thumbnailUrl)
+    val palette by coverPalette(state.manga?.thumbnailUrl, state.manga?.source)
     val isDarkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     MangaReaderTheme(darkTheme = isDarkTheme, coverSeed = palette?.tint) {
@@ -493,26 +500,39 @@ private data class CoverPalette(
 /**
  * Extracts the cover palette for tinting the detail screen.
  * Null while loading or when unavailable.
+ *
+ * The request goes through [coverImageRequest] with the source's cover
+ * headers and a small decode: without the headers the load failed on CDNs
+ * that gate on them (the cover itself displayed, but the screen lost its
+ * color), and at full resolution the decode of a large cover could fail or
+ * evict the memory cache, which is why the color faded the more mangas were
+ * opened. Failures are logged (`adb logcat -s CoverPalette`) instead of
+ * being swallowed, so this is diagnosable.
  */
 @Composable
-private fun coverPalette(coverUrl: String?): State<CoverPalette?> {
+private fun coverPalette(coverUrl: String?, sourceId: Long?): State<CoverPalette?> {
     val context = LocalContext.current
     val state = remember(coverUrl) { mutableStateOf<CoverPalette?>(null) }
-    LaunchedEffect(coverUrl) {
+    LaunchedEffect(coverUrl, sourceId) {
         state.value = null
         if (coverUrl.isNullOrBlank()) return@LaunchedEffect
-        runCatching {
-            val loader = SingletonImageLoader.get(context)
-            val request = ImageRequest.Builder(context)
-                .data(coverUrl)
-                .build()
-            val result = loader.execute(request) as? SuccessResult ?: return@runCatching
-            var bitmap = (result.image as? BitmapImage)?.bitmap ?: return@runCatching
-            if (bitmap.config == Bitmap.Config.HARDWARE) {
-                bitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: return@runCatching
-            }
-            state.value = withContext(Dispatchers.Default) { paletteOf(bitmap) }
+        val loaded = runCatching {
+            val request = coverImageRequest(context, coverUrl, sourceId, sizePx = PALETTE_SIZE_PX)
+            SingletonImageLoader.get(context).execute(request) as? SuccessResult
         }
+        val result = loaded.getOrNull()
+        if (result == null) {
+            val cause = loaded.exceptionOrNull()
+            Log.w(
+                PALETTE_TAG,
+                "paleta falhou host=${runCatching { Uri.parse(coverUrl).host }} " +
+                    "err=${cause?.let { "${it::class.java.simpleName}: ${it.message}" } ?: "sem imagem"}",
+            )
+            return@LaunchedEffect
+        }
+        // O request pede ARGB_8888, então getPixels é seguro sem cópia.
+        val bitmap = (result.image as? BitmapImage)?.bitmap ?: return@LaunchedEffect
+        state.value = withContext(Dispatchers.Default) { paletteOf(bitmap) }
     }
     return state
 }

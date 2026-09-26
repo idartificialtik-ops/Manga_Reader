@@ -174,14 +174,14 @@ keytool -genkeypair -v -keystore manga-reader.jks -storetype PKCS12 \
 O APK já compilado fica na aba **[Releases](https://github.com/idartificialtik-ops/Manga_Reader/releases)**.
 
 **No celular (Android 8+)**
-1. Baixe o `app-debug.apk` da release.
+1. Baixe o `app-release.apk` da release.
 2. Abra o arquivo; o Android vai pedir autorização para **"instalar apps de fontes desconhecidas"**
    — libere para o navegador/gerenciador de arquivos que fez o download.
 3. Confirme a instalação.
 
 **Via ADB**
 ```bash
-adb install -r app-debug.apk
+adb install -r app-release.apk
 ```
 
 > Requer Android 8.0+ (`minSdk 26`). O app pede permissão de instalação de pacotes para
@@ -199,7 +199,9 @@ Tudo opcional, feito pelo próprio app (**Mais → …**):
 | **Mais → Tradução** | Motor de OCR (ONNX / ML Kit / automático) e tradutor (IA / ML Kit / automático) |
 | **Mais → Aparência** | Tema claro/escuro/sistema, 7 paletas, AMOLED |
 | **Feed (⚙)** | Intervalo de atualização, atualização automática, chave da **Exa** (link "Pegar chave") |
-| **Extensões** | Repositório Keiyoushi, instalar/desinstalar fontes |
+| **Extensões** | Repositório Keiyoushi, instalar/desinstalar fontes, filtro por idioma, ocultar 18+ |
+| **Navegar (⚙/🌐)** | Filtro de idiomas, ocultar fontes 18+, WebView para passar na verificação do Cloudflare |
+| **Fonte (⚙)** | Configurações da extensão (login, cookies, chaves) quando ela expõe |
 
 ---
 
@@ -215,14 +217,23 @@ Tudo opcional, feito pelo próprio app (**Mais → …**):
 
 ## Limitações conhecidas
 
-- APK publicado é de **build debug** (sem assinatura de release): é o jeito de compartilhar
-  agora; para distribuição oficial vale assinar com uma chave própria.
+- O APK publicado é **assinado** com chave de release do projeto (dá para instalar por cima de
+  versões anteriores). Não é a chave oficial da Play Store, então não vai para a loja.
 - **Algumas fontes podem falhar por rede/ISP** (ex.: Comic Fury e MangaPlus retornam timeout em
   algumas operadoras/VPNs). Não é bug do app — o app detecta e avisa, e aplica cooldown.
+- **Fontes atrás de Cloudflare**: o app tenta resolver o desafio sozinho (WebView invisível) e, se
+  não conseguir, oferece um WebView na tela da fonte para você resolver na mão. Bloqueio por
+  reputação de IP (VPN/datacenter) não é resolvido por nenhum dos dois caminhos.
 - A tradução depende do qualidade do OCR: balões muito pequenos ou fonte estilizada podem sair
   com recognize impreciso.
 - O modelo OCR (~22 MB) é baixado no primeiro uso da tradução.
 - Integração com trackers (AniList/MAL) ainda não implementada — o botão aparece desabilitado na tela de detalhes.
+
+---
+
+## Licença
+
+[MIT](LICENSE) — use, modifique e redistribua livremente, inclusive para fins comerciais.
 
 ---
 

@@ -3,6 +3,7 @@ package dev.idart.mangareader.ui.browse
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -21,6 +22,15 @@ class BrowseFilterRepository(
 
     val hiddenLangs: Flow<Set<String>> = context.browseFilterDataStore.data.map { preferences ->
         preferences[HIDDEN_LANGS_KEY] ?: emptySet()
+    }
+
+    /** Hides sources whose extension is flagged 18+ by the repo index. */
+    val hideNsfw: Flow<Boolean> = context.browseFilterDataStore.data.map { preferences ->
+        preferences[HIDE_NSFW_KEY] ?: false
+    }
+
+    suspend fun setHideNsfw(hide: Boolean) {
+        context.browseFilterDataStore.edit { preferences -> preferences[HIDE_NSFW_KEY] = hide }
     }
 
     suspend fun setLangVisible(lang: String, visible: Boolean) {
@@ -44,5 +54,6 @@ class BrowseFilterRepository(
 
     companion object {
         private val HIDDEN_LANGS_KEY = stringSetPreferencesKey("hidden_langs")
+        private val HIDE_NSFW_KEY = booleanPreferencesKey("hide_nsfw_sources")
     }
 }

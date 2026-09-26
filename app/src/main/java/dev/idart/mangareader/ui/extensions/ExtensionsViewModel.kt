@@ -28,9 +28,13 @@ sealed interface InstallUiState {
     data class Error(val message: String) : InstallUiState
 }
 
+/** One-shot message for the UI (uninstall result). */
+data class ExtensionNotice(val id: Long, val message: String)
+
 data class ExtensionsUiState(
     val extensions: List<ExtensionManager.ExtensionInfo> = emptyList(),
     val isLoading: Boolean = true,
+    val notice: ExtensionNotice? = null,
 )
 
 data class CatalogEntry(
@@ -42,6 +46,7 @@ data class CatalogUiState(
     val entries: List<CatalogEntry> = emptyList(),
     val repos: List<RepoEntry> = emptyList(),
     val repoFilter: String? = null,
+    val langFilter: String? = null,
     val hideNsfw: Boolean = false,
     val repoWarnings: List<String> = emptyList(),
     val isLoading: Boolean = true,
@@ -113,7 +118,7 @@ class ExtensionsViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true) }
-            extensionManager.refresh()
+            refreshInstalled()
         }
     }
 
@@ -133,6 +138,18 @@ class ExtensionsViewModel(
                 val errors = when {
                     entries.isEmpty() && repos.isNotEmpty() -> warnings.ifEmpty { listOf("Nenhum repositório respondeu") }
                     else -> null
+                }
+                // Cache the 18+ classification for the Browse tab. Only when we
+                // really got an index: a failed fetch must not wipe the list.
+                if (entries.isNotEmpty()) {
+                    runCatching {
+                        extensionRepoStore.setNsfwPackages(
+                            entries
+                                .filter { it.extension.isNsfwEffective }
+                                .map { it.extension.packageName }
+                                .toSet(),
+                        )
+                    }
                 }
                 _catalog.update {
                     it.copy(
@@ -161,6 +178,11 @@ class ExtensionsViewModel(
 
     fun setRepoFilter(repoName: String?) {
         _catalog.update { it.copy(repoFilter = repoName) }
+    }
+
+    /** Toggling the active language clears the filter (same as the repo chips). */
+    fun setLangFilter(lang: String?) {
+        _catalog.update { it.copy(langFilter = if (it.langFilter == lang) null else lang) }
     }
 
     fun setHideNsfw(hide: Boolean) {
@@ -205,6 +227,7 @@ class ExtensionsViewModel(
         val query = state.query.trim().lowercase()
         return state.entries.filter { (repo, ext) ->
             (state.repoFilter == null || repo.name == state.repoFilter) &&
+                (state.langFilter == null || state.langFilter in ext.langs) &&
                 (!state.hideNsfw || !ext.isNsfwEffective) &&
                 (
                     query.isBlank() ||
@@ -212,6 +235,45 @@ class ExtensionsViewModel(
                         ext.packageName.lowercase().contains(query) ||
                         ext.sources.any { it.name.lowercase().contains(query) }
                     )
+        }
+    }
+
+    /**
+     * Languages present in the loaded catalog, ordered like the Browse tab
+     * (pt-BR first) so the same code always reads the same way.
+     */
+    fun availableLangs(): List<String> {
+        return _catalog.value.entries
+            .flatMap { it.extension.langs }
+            .distinct()
+            .sortedWith(compareBy({ LANG_ORDER.indexOf(it).takeIf { i -> i >= 0 } ?: Int.MAX_VALUE }, { it }))
+    }
+
+    /**
+     * Extension count per language (respecting the NSFW toggle, ignoring the
+     * text query, the repo filter and the language filter itself).
+     */
+    fun langCounts(): Map<String, Int> {
+        val state = _catalog.value
+        return state.entries
+            .filter { (repo, _) -> state.repoFilter == null || repo.name == state.repoFilter }
+            .filter { !state.hideNsfw || !it.extension.isNsfwEffective }
+            .flatMap { it.extension.langs }
+            .groupingBy { it }
+            .eachCount()
+    }
+
+    /**
+     * How many extensions the language chips cover in total: an extension with
+     * several languages counts once, so the "Todos" chip is the real number of
+     * rows, not the sum of the per-language counts.
+     */
+    fun visibleExtensionCount(): Int {
+        val state = _catalog.value
+        return state.entries.count { (repo, ext) ->
+            (state.repoFilter == null || repo.name == state.repoFilter) &&
+                (!state.hideNsfw || !ext.isNsfwEffective) &&
+                ext.langs.isNotEmpty()
         }
     }
 
@@ -262,7 +324,34 @@ class ExtensionsViewModel(
 
     private fun refreshInstalled() {
         viewModelScope.launch {
-            extensionManager.refresh()
+            val installed = extensionManager.refresh()
+            // Fontes que sumiram (desinstaladas) não podem deixar login e
+            // cookie órfãos no disco.
+            val current = installed.flatMap { it.sources }.map { it.id }.toSet()
+            val gone = knownSourceIds - current
+            if (gone.isNotEmpty()) {
+                extensionManager.clearPreferences(gone.toList())
+            }
+            knownSourceIds = current
         }
+    }
+
+    /** Source ids seen at the last refresh, to detect uninstalls. */
+    private var knownSourceIds: Set<Long> = emptySet()
+
+    fun consumeNotice() {
+        _state.update { it.copy(notice = null) }
+    }
+
+    private fun notify(message: String) {
+        _state.update { it.copy(notice = ExtensionNotice(System.currentTimeMillis(), message)) }
+    }
+
+    /** Message shown once, e.g. when the uninstall is handed to the system. */
+    fun notifyOnce(message: String) = notify(message)
+
+    companion object {
+        /** pt-BR and the other common ones first, then the rest alphabetically. */
+        private val LANG_ORDER = listOf("pt-br", "pt", "en", "es", "all")
     }
 }

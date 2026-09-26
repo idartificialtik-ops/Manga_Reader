@@ -42,6 +42,8 @@ import dev.idart.mangareader.ui.more.MoreScreen
 import dev.idart.mangareader.ui.more.ThemeScreen
 import dev.idart.mangareader.ui.more.TranslationSettingsScreen
 import dev.idart.mangareader.ui.reader.ReaderScreen
+import dev.idart.mangareader.ui.sourceconfig.SourceConfigScreen
+import dev.idart.mangareader.ui.sourcewebview.SourceWebViewScreen
 
 private data class TopLevelDestination(
     val route: Any,
@@ -196,7 +198,11 @@ fun MangaReaderNavGraph() {
                 ThemeScreen(onBack = { navController.popBackStack() })
             }
             composable<Extensions> {
-                ExtensionsScreen(onBack = { navController.popBackStack() })
+                ExtensionsScreen(
+                    onBack = { navController.popBackStack() },
+                    onSourceConfig = { id -> navController.navigate(SourceConfig(id)) },
+                    onSourceWebView = { id -> navController.navigate(SourceWebView(id)) },
+                )
             }
             composable<Downloads> {
                 DownloadsScreen(
@@ -227,6 +233,26 @@ fun MangaReaderNavGraph() {
                     onMangaOpen = { mangaId ->
                         navController.navigate(MangaDetail(mangaId))
                     },
+                    onConfigClick = { id ->
+                        navController.navigate(SourceConfig(id))
+                    },
+                    onWebViewClick = { id ->
+                        navController.navigate(SourceWebView(id))
+                    },
+                )
+            }
+            composable<SourceConfig> { entry ->
+                val route = entry.toRoute<SourceConfig>()
+                SourceConfigScreen(
+                    sourceId = route.sourceId,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable<SourceWebView> { entry ->
+                val route = entry.toRoute<SourceWebView>()
+                SourceWebViewScreen(
+                    sourceId = route.sourceId,
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable<Reader> { entry ->

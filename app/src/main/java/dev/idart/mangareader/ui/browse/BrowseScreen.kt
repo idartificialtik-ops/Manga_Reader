@@ -28,7 +28,9 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -47,6 +49,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -69,6 +72,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coil3.compose.rememberAsyncImagePainter
+import dev.idart.mangareader.domain.source.service.SourceManager
 import dev.idart.mangareader.source.CatalogueSource
 import dev.idart.mangareader.source.model.Filter
 import dev.idart.mangareader.source.model.FilterList
@@ -85,9 +89,11 @@ fun BrowseScreen(
     onSourceClick: (sourceId: Long) -> Unit,
     onSearchClick: () -> Unit,
 ) {
-    val viewModel: BrowseViewModel = injektViewModel { BrowseViewModel(Injekt.get(), Injekt.get()) }
+    val viewModel: BrowseViewModel = injektViewModel { BrowseViewModel(Injekt.get(), Injekt.get(), Injekt.get()) }
     val state by viewModel.state.collectAsState()
     val hiddenLangs by viewModel.hiddenLangs.collectAsState()
+    val hideNsfw by viewModel.hideNsfw.collectAsState()
+    val hiddenNsfwCount by viewModel.hiddenNsfwCount.collectAsState()
     val expandedGroups by viewModel.expandedGroups.collectAsState()
     var showLangDialog by remember { mutableStateOf(false) }
 
@@ -160,6 +166,24 @@ fun BrowseScreen(
                     modifier = Modifier.clickable { showLangDialog = true },
                 )
             }
+            item(key = "nsfw-filter") {
+                ListItem(
+                    headlineContent = { Text("Ocultar fontes 18+") },
+                    supportingContent = {
+                        Text(
+                            when {
+                                hiddenNsfwCount > 0 -> "$hiddenNsfwCount fonte(s) ocultas"
+                                state.nsfwSourceIds.isNotEmpty() -> "Nenhuma fonte 18+ instalada"
+                                else -> "Abra Extensões uma vez para classificar as extensões"
+                            },
+                        )
+                    },
+                    trailingContent = {
+                        Switch(checked = hideNsfw, onCheckedChange = viewModel::setHideNsfw)
+                    },
+                    modifier = Modifier.clickable { viewModel.setHideNsfw(!hideNsfw) },
+                )
+            }
             item(key = "lang-divider") {
                 HorizontalDivider()
             }
@@ -191,6 +215,15 @@ fun BrowseScreen(
                                 ListItem(
                                     headlineContent = { Text(source.name) },
                                     leadingContent = { SourceIcon(source) },
+                                    trailingContent = {
+                                        if (source.id in state.nsfwSourceIds) {
+                                            Text(
+                                                "18+",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    },
                                     modifier = Modifier
                                         .clickable { onSourceClick(source.id) }
                                         .padding(start = 16.dp),
@@ -246,6 +279,8 @@ fun SourceBrowseScreen(
     initialQuery: String = "",
     onBack: () -> Unit,
     onMangaOpen: (mangaId: Long) -> Unit,
+    onConfigClick: (sourceId: Long) -> Unit = {},
+    onWebViewClick: (sourceId: Long) -> Unit = {},
 ) {
     val viewModel: SourceBrowseViewModel = injektViewModel {
         SourceBrowseViewModel(Injekt.get(), Injekt.get(), Injekt.get(), sourceId, initialQuery)
@@ -267,6 +302,22 @@ fun SourceBrowseScreen(
                     }
                 },
                 actions = {
+                    val extension = remember(sourceId) {
+                        Injekt.get<SourceManager>().getSource(sourceId) as? ExtensionSource
+                    }
+                    // Só aparece quando a extensão expõe uma tela de
+                    // configurações (login, cookies, chaves de API).
+                    if (extension?.isConfigurable == true) {
+                        IconButton(onClick = { onConfigClick(sourceId) }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Configurar fonte")
+                        }
+                    }
+                    // Cloudflare com checkbox/CAPTCHA: solver manual.
+                    if (extension?.baseUrl != null) {
+                        IconButton(onClick = { onWebViewClick(sourceId) }) {
+                            Icon(Icons.Filled.Language, contentDescription = "Abrir no WebView")
+                        }
+                    }
                     IconButton(onClick = { showFilters = true }) {
                         Icon(
                             Icons.Filled.FilterList,

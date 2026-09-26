@@ -68,7 +68,7 @@ fun AiScreen(
     onMangaOpen: (mangaId: Long) -> Unit,
 ) {
     val viewModel: AiViewModel = injektViewModel {
-        AiViewModel(Injekt.get(), Injekt.get(), Injekt.get())
+        AiViewModel(Injekt.get(), Injekt.get(), Injekt.get(), Injekt.get())
     }
     val messages by viewModel.messages.collectAsState()
     val busy by viewModel.busy.collectAsState()

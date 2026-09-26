@@ -11,11 +11,12 @@ plugins {
 // Sem esse arquivo o build de release sai sem assinatura, o que impede
 // publicar na Play Store.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
-val keystoreProperties = Properties().apply {
-    if (keystorePropertiesFile.exists()) {
-        keystorePropertiesFile.inputStream().use { load(it) }
+val keystoreProperties =
+    Properties().apply {
+        if (keystorePropertiesFile.exists()) {
+            keystorePropertiesFile.inputStream().use { load(it) }
+        }
     }
-}
 
 android {
     namespace = "dev.idart.mangareader"
@@ -25,8 +26,8 @@ android {
         applicationId = "dev.idart.mangareader"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     signingConfigs {
@@ -92,6 +93,8 @@ dependencies {
     implementation(libs.coil3.network)
     implementation(libs.androidx.work.runtime)
     implementation(libs.androidx.datastore.preferences)
+    // Renders the extension-provided preference screens in Compose.
+    implementation(libs.androidx.preference)
 
     implementation(libs.sqldelight.android.driver)
 

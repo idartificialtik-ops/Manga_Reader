@@ -16,6 +16,7 @@ import dev.idart.mangareader.domain.source.service.SourceManager
 import dev.idart.mangareader.source.model.SManga
 import dev.idart.mangareader.sources.download.ChapterDownloadState
 import dev.idart.mangareader.sources.download.DownloadManager
+import dev.idart.mangareader.ui.browse.friendlySourceError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -95,7 +96,9 @@ class MangaDetailViewModel(
                     isLoading = false,
                 )
             }
-                .catch { e -> _state.value = MangaDetailUiState(isLoading = false, error = e.message) }
+                .catch { e ->
+                    _state.value = MangaDetailUiState(isLoading = false, error = friendlySourceError(e, mangaId))
+                }
                 .collect { _state.value = it }
         }
         viewModelScope.launch {
@@ -109,7 +112,7 @@ class MangaDetailViewModel(
                     fetchMangaDetails.await(mangaId)
                 }
             } catch (e: Throwable) {
-                _state.update { it.copy(error = e.message) }
+                _state.update { it.copy(error = friendlySourceError(e, mangaId)) }
             } finally {
                 _state.update { it.copy(isRefreshing = false) }
             }
@@ -136,7 +139,7 @@ class MangaDetailViewModel(
             try {
                 fetchMangaDetails.await(mangaId)
             } catch (e: Throwable) {
-                _state.update { it.copy(error = e.message) }
+                _state.update { it.copy(error = friendlySourceError(e, mangaId)) }
             } finally {
                 _state.update { it.copy(isRefreshing = false) }
             }

@@ -33,6 +33,7 @@ import dev.idart.mangareader.translate.TranslatorSettings
 import dev.idart.mangareader.ui.ai.AgentTools
 import dev.idart.mangareader.ui.ai.AiClient
 import dev.idart.mangareader.ui.ai.AiSettings
+import dev.idart.mangareader.ui.ai.ChatHistoryStore
 import dev.idart.mangareader.ui.browse.BrowseFilterRepository
 import dev.idart.mangareader.ui.feed.ExaClient
 import dev.idart.mangareader.ui.feed.ExaSettings
@@ -73,6 +74,7 @@ class AppModule(val app: Application) : InjektModule {
         addSingletonFactory { OnnxMangaOcr(get()) }
         addSingletonFactory { AiSettings(app) }
         addSingletonFactory { AiClient() }
+        addSingletonFactory { ChatHistoryStore(app) }
         addSingletonFactory { TranslatorSettings(app) }
         addSingletonFactory { ExaSettings(app) }
         addSingletonFactory { ExaClient() }

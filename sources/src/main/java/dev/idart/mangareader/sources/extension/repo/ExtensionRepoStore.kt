@@ -45,6 +45,19 @@ class ExtensionRepoStore(
         context.extensionRepoPrefs.edit { prefs -> prefs[HIDE_NSFW_KEY] = hide }
     }
 
+    /**
+     * Packages the repo index flags as 18+. Extensions carry no such flag at
+     * runtime, so the classification is cached here when the catalog loads;
+     * the Browse tab uses it to hide those sources.
+     */
+    val nsfwPackages: Flow<Set<String>> = context.extensionRepoPrefs.data.map { prefs ->
+        prefs[NSFW_PACKAGES_KEY] ?: emptySet()
+    }
+
+    suspend fun setNsfwPackages(packages: Set<String>) {
+        context.extensionRepoPrefs.edit { prefs -> prefs[NSFW_PACKAGES_KEY] = packages }
+    }
+
     suspend fun addRepo(entry: RepoEntry) {
         val encoded = json.encodeToString(RepoEntry.serializer(), entry)
         context.extensionRepoPrefs.edit { prefs ->
@@ -77,6 +90,7 @@ class ExtensionRepoStore(
     companion object {
         private val REPOS_KEY = stringSetPreferencesKey("repos")
         private val HIDE_NSFW_KEY = booleanPreferencesKey("hide_nsfw")
+        private val NSFW_PACKAGES_KEY = stringSetPreferencesKey("nsfw_packages")
 
         fun defaultRepos(): List<RepoEntry> {
             return listOf(

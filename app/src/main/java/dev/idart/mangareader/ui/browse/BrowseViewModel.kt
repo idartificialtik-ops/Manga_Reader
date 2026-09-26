@@ -4,12 +4,25 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.idart.mangareader.domain.source.service.SourceManager
 import dev.idart.mangareader.source.CatalogueSource
+import dev.idart.mangareader.sources.extension.ExtensionSource
+import dev.idart.mangareader.sources.extension.repo.ExtensionRepoStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/**
+ * Whether a source belongs to an extension the repo index flags as 18+.
+ * Sources carry no such flag at runtime, so the comparison is by extension
+ * package. Built-in ports are never 18+.
+ */
+fun CatalogueSource.isNsfw(nsfwPackages: Set<String>): Boolean {
+    val pkg = (this as? ExtensionSource)?.extensionPackage ?: return false
+    return pkg in nsfwPackages
+}
 
 data class SourceGroup(
     val lang: String,
@@ -19,6 +32,8 @@ data class SourceGroup(
 
 data class BrowseUiState(
     val sources: List<CatalogueSource> = emptyList(),
+    /** Source ids whose extension is flagged 18+ (shown with a badge). */
+    val nsfwSourceIds: Set<Long> = emptySet(),
 ) {
     val groups: List<SourceGroup>
         get() {
@@ -61,6 +76,7 @@ fun langDisplayName(lang: String): String {
 class BrowseViewModel(
     sourceManager: SourceManager,
     private val filterRepository: BrowseFilterRepository,
+    private val extensionRepoStore: ExtensionRepoStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(BrowseUiState(sourceManager.getCatalogueSources()))
@@ -68,6 +84,22 @@ class BrowseViewModel(
 
     val hiddenLangs: StateFlow<Set<String>> = filterRepository.hiddenLangs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    /** 18+ toggle state (persisted). */
+    val hideNsfw: StateFlow<Boolean> = filterRepository.hideNsfw
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    /**
+     * How many sources the 18+ toggle is hiding right now — the UI shows it so
+     * the filter is never a silent hole in the list.
+     */
+    val hiddenNsfwCount: StateFlow<Int> = combine(
+        sourceManager.catalogueSources,
+        extensionRepoStore.nsfwPackages,
+        hideNsfw,
+    ) { sources, nsfwPackages, hide ->
+        if (hide) sources.count { it.isNsfw(nsfwPackages) } else 0
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     /**
      * Expanded source groups. Empty by default (all collapsed). Kept here
@@ -81,11 +113,25 @@ class BrowseViewModel(
         _expandedGroups.value = if (lang in current) current - lang else current + lang
     }
 
+    fun setHideNsfw(hide: Boolean) {
+        viewModelScope.launch {
+            filterRepository.setHideNsfw(hide)
+        }
+    }
+
     init {
         viewModelScope.launch {
-            sourceManager.catalogueSources.collect { sources ->
-                _state.value = BrowseUiState(sources)
-            }
+            combine(
+                sourceManager.catalogueSources,
+                extensionRepoStore.nsfwPackages,
+                hideNsfw,
+            ) { sources, nsfwPackages, hide ->
+                val nsfwIds = sources.filter { it.isNsfw(nsfwPackages) }.map { it.id }.toSet()
+                BrowseUiState(
+                    sources = if (hide) sources.filterNot { it.id in nsfwIds } else sources,
+                    nsfwSourceIds = nsfwIds,
+                )
+            }.collect { _state.value = it }
         }
     }
 

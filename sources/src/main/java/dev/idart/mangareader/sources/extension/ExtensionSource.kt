@@ -1,7 +1,12 @@
 package dev.idart.mangareader.sources.extension
 
+import android.content.Context
+import androidx.preference.PreferenceManager
+import androidx.preference.PreferenceScreen
 import dev.idart.mangareader.source.RelatedMangas
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.SOURCE_PREFS_PREFIX
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
@@ -26,6 +31,7 @@ import eu.kanade.tachiyomi.source.model.SManga as ExtSManga
 import eu.kanade.tachiyomi.source.model.SMangaImpl as ExtSMangaImpl
 import eu.kanade.tachiyomi.source.model.SMangaUpdate as ExtSMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy as ExtUpdateStrategy
+import eu.kanade.tachiyomi.source.online.HttpSource as ExtHttpSource
 
 /**
  * Bridges an external extension source (`eu.kanade.tachiyomi` API, loaded from
@@ -75,6 +81,34 @@ class ExtensionSource(
 
     override fun getFilterList(): DevFilterList {
         return extSource.getFilterList().toDev()
+    }
+
+    /** True when the extension ships a settings screen (login, cookies, keys). */
+    val isConfigurable: Boolean get() = extSource is ConfigurableSource
+
+    /** Site root of the extension — where the in-app WebView starts. */
+    val baseUrl: String? get() = (extSource as? ExtHttpSource)?.baseUrl
+
+    /** User-Agent the extension itself uses, for the in-app WebView. */
+    fun userAgent(): String? = runCatching { coverHeaders()?.get("User-Agent") }.getOrNull()
+
+    /**
+     * Builds the extension's own preference screen, backed by the very same
+     * SharedPreferences file the source reads (`source_<id>`) — so whatever
+     * the user saves here is what the source sees on its next request.
+     *
+     * Returns null when the extension has no settings, or when building the
+     * screen fails (an extension built against a different preferences-lib
+     * can throw NoClassDefFoundError here).
+     */
+    fun buildPreferenceScreen(context: Context): PreferenceScreen? {
+        val configurable = extSource as? ConfigurableSource ?: return null
+        return runCatching {
+            PreferenceManager(context)
+                .apply { setSharedPreferencesName(SOURCE_PREFS_PREFIX + id) }
+                .createPreferenceScreen(context)
+                .also { configurable.setupPreferenceScreen(it) }
+        }.getOrNull()
     }
 
     override suspend fun getPopularManga(page: Int): DevMangasPage = withContext(Dispatchers.IO) {

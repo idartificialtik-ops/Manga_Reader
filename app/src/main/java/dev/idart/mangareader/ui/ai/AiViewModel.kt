@@ -30,6 +30,7 @@ class AiViewModel(
     private val settings: AiSettings,
     private val client: AiClient,
     private val tools: AgentTools,
+    private val history: ChatHistoryStore,
 ) : ViewModel() {
 
     val baseUrl: StateFlow<String> = settings.baseUrl
@@ -60,6 +61,17 @@ class AiViewModel(
 
     /** True while a live (streaming/status) bubble is reserved for this turn. */
     private var pendingLive = false
+
+    init {
+        // Restaura a conversa anterior. Uma única leitura: a partir daqui quem
+        // manda na lista é o turno atual (e `persist`).
+        viewModelScope.launch {
+            val saved = runCatching { history.load() }.getOrDefault(emptyList())
+            if (saved.isNotEmpty() && _messages.value.isEmpty()) {
+                _messages.value = saved
+            }
+        }
+    }
 
     fun setBaseUrl(value: String) = settings.setBaseUrl(value)
     fun setApiKey(value: String) = settings.setApiKey(value)
@@ -143,6 +155,8 @@ class AiViewModel(
             } finally {
                 pendingLive = false
                 _busy.value = false
+                // Grava o histórico uma vez por turno (não a cada token).
+                runCatching { history.save(_messages.value) }
             }
         }
     }
@@ -464,6 +478,9 @@ class AiViewModel(
     fun clear() {
         job?.cancel()
         _messages.value = emptyList()
+        viewModelScope.launch {
+            runCatching { history.clear() }
+        }
     }
 
     companion object {

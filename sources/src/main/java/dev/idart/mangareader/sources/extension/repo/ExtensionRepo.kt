@@ -46,6 +46,17 @@ data class RepoExtension(
     val isNsfwEffective: Boolean
         get() = isNsfw || contentWarning == "CONTENT_WARNING_NSFW" || contentWarning == "CONTENT_WARNING_MIXED"
 
+    /**
+     * Language codes this extension provides. The index declares them either
+     * on the extension (`language`, ISO 639-1) or per source (`lang`), and
+     * some entries use only one of the two — so both are merged.
+     */
+    val langs: List<String>
+        get() = (language.map { it.trim() } + sources.map { it.effectiveLang.trim() })
+            .filter { it.isNotBlank() }
+            .map { it.lowercase() }
+            .distinct()
+
     /** Placeholder notice entries, not real installable extensions. */
     fun isPlaceholder(): Boolean {
         return packageName.endsWith(".keiyoushi") || packageName.endsWith(".mihon") ||

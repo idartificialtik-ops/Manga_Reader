@@ -1,5 +1,7 @@
 package dev.idart.mangareader.ui.components
 
+import android.content.Context
+import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -21,6 +23,7 @@ import coil3.compose.SubcomposeAsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
+import coil3.request.bitmapConfig
 import coil3.request.crossfade
 import dev.idart.mangareader.domain.source.service.SourceManager
 import dev.idart.mangareader.sources.extension.ExtensionSource
@@ -28,6 +31,46 @@ import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 
 private const val TAG = "MangaCover"
+
+/**
+ * Cover request with the source's own headers (User-Agent, Referer) attached,
+ * so image CDNs that gate on headers keep working.
+ *
+ * Shared with the cover-palette extraction on the detail screen: the palette
+ * used to build its own bare request, so any cover that needs those headers
+ * displayed fine but produced no color.
+ *
+ * [sizePx] asks Coil for a scaled decode instead of the full-resolution image
+ * (the palette only needs a few pixels per color) and forces a software
+ * bitmap, so callers can read pixels without copying.
+ */
+fun coverImageRequest(
+    context: Context,
+    coverUrl: String,
+    sourceId: Long?,
+    sizePx: Int? = null,
+    crossfade: Boolean = false,
+): ImageRequest {
+    val builder = ImageRequest.Builder(context).data(coverUrl)
+    if (crossfade) builder.crossfade(true)
+    if (sizePx != null) {
+        builder.size(sizePx)
+        builder.bitmapConfig(Bitmap.Config.ARGB_8888)
+    }
+    val headers = sourceId?.let { id ->
+        runCatching {
+            (Injekt.get<SourceManager>().getSource(id) as? ExtensionSource)?.coverHeaders()
+        }.getOrNull()
+    }
+    if (headers != null) {
+        val networkHeaders = NetworkHeaders.Builder()
+        for (i in 0 until headers.size) {
+            networkHeaders.add(headers.name(i), headers.value(i))
+        }
+        builder.httpHeaders(networkHeaders.build())
+    }
+    return builder.build()
+}
 
 /**
  * Manga cover with the source's own headers (User-Agent etc.) attached, so
@@ -48,20 +91,7 @@ fun MangaCover(
     }
     val context = LocalContext.current
     val model = remember(coverUrl, sourceId) {
-        val headers = sourceId?.let { id ->
-            runCatching {
-                (Injekt.get<SourceManager>().getSource(id) as? ExtensionSource)?.coverHeaders()
-            }.getOrNull()
-        }
-        val builder = ImageRequest.Builder(context).data(coverUrl).crossfade(true)
-        if (headers != null) {
-            val networkHeaders = NetworkHeaders.Builder()
-            for (i in 0 until headers.size) {
-                networkHeaders.add(headers.name(i), headers.value(i))
-            }
-            builder.httpHeaders(networkHeaders.build())
-        }
-        builder.build()
+        coverImageRequest(context, coverUrl, sourceId, crossfade = true)
     }
     SubcomposeAsyncImage(
         model = model,

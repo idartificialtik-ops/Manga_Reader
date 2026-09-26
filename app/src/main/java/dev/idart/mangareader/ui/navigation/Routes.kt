@@ -38,5 +38,13 @@ data class MangaDetail(val mangaId: Long)
 @Serializable
 data class SourceBrowse(val sourceId: Long, val initialQuery: String = "")
 
+/** Extension-provided settings (login, cookies, API keys). */
+@Serializable
+data class SourceConfig(val sourceId: Long)
+
+/** Manual Cloudflare/login WebView for a source. */
+@Serializable
+data class SourceWebView(val sourceId: Long)
+
 @Serializable
 data class Reader(val mangaId: Long, val chapterId: Long)

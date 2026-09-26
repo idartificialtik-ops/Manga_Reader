@@ -187,15 +187,6 @@ class SourceBrowseViewModel(
                 "Operação não suportada por esta fonte."
             }
         }
-        if (e is java.net.UnknownHostException) {
-            return "Servidor não encontrado (DNS). Verifique a internet, VPN ou DNS privado."
-        }
-        if (e is java.net.SocketTimeoutException || e is java.net.ConnectException) {
-            return "Sem resposta do servidor (timeout). Sua rede pode estar bloqueando este site — teste no 4G/5G ou desligue a VPN."
-        }
-        if (e is javax.net.ssl.SSLException) {
-            return "Falha de conexão segura (TLS). Teste em outra rede."
-        }
-        return e.message?.let { "${e::class.simpleName}: $it" } ?: e::class.simpleName ?: "Erro de rede"
+        return friendlySourceError(e, sourceId)
     }
 }

@@ -33,6 +33,8 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.injekt.core)
     implementation(libs.rxjava1)
+    // Builds the extension's own preference screen (login, cookies…).
+    implementation(libs.androidx.preference)
 
     testImplementation(libs.junit)
 }
