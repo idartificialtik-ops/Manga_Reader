@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -38,7 +39,13 @@ fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
     style: TextStyle = MaterialTheme.typography.bodyMedium,
-    color: Color = Color.Unspecified,
+    /**
+     * Herda a cor do conteúdo (LocalContentColor) em vez de `Color.Unspecified`:
+     * repassar Unspecified para `style.copy(color = ...)` fazia o texto cair na
+     * cor padrão de desenho, e as respostas do assistente saían escuras demais
+     * para ler no tema escuro.
+     */
+    color: Color = LocalContentColor.current,
 ) {
     val blocks = remember(text) { parseBlocks(text) }
     val uriHandler = LocalUriHandler.current

@@ -11,11 +11,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class UiChatMessage(
     val fromUser: Boolean,
@@ -45,8 +47,49 @@ class AiViewModel(
     private val _messages = MutableStateFlow<List<UiChatMessage>>(emptyList())
     val messages: StateFlow<List<UiChatMessage>> = _messages.asStateFlow()
 
+    /** Conversas salvas, mais recente primeiro. */
+    val threads: StateFlow<List<ChatThread>> = history.threads
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Conversa em andamento. Trocar de thread é trocar este id: o salvamento
+     * contínuo abaixo sempre escreve no lugar certo.
+     */
+    private var threadId = System.currentTimeMillis()
+
+    @Volatile
+    private var loadedOnce = false
+
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    /**
+     * O que o assistente está fazendo agora. Sem isso o chat mostra só um
+     * spinner e o usuário não sabe se travou ou está procurando.
+     */
+    private val _activity = MutableStateFlow<String?>(null)
+    val activity: StateFlow<String?> = _activity.asStateFlow()
+
+    /**
+     * Resultado que o usuário precisa ver depois que a atividade some: sem
+     * isto, "procurando os títulos…" piscava e sumia sem dizer o resultado.
+     */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    private fun doing(text: String) {
+        _activity.value = text
+    }
+
+    private fun note(text: String) {
+        _notice.value = text
+    }
+
+    /**
+     * Confirmação de desinstalação pedida pelo assistente. Sem resposta do
+     * usuário a ferramenta recusa sozinha.
+     */
+    val pendingExtensionRemoval: StateFlow<AgentTools.PendingAction?> = tools.pendingAction
 
     private val _models = MutableStateFlow<List<String>>(emptyList())
     val models: StateFlow<List<String>> = _models.asStateFlow()
@@ -63,13 +106,101 @@ class AiViewModel(
     private var pendingLive = false
 
     init {
-        // Restaura a conversa anterior. Uma única leitura: a partir daqui quem
-        // manda na lista é o turno atual (e `persist`).
+        // Retoma a conversa mais recente: "histórico" sem isso é só um nome.
         viewModelScope.launch {
-            val saved = runCatching { history.load() }.getOrDefault(emptyList())
-            if (saved.isNotEmpty() && _messages.value.isEmpty()) {
-                _messages.value = saved
+            loadedOnce = false
+            val latest = runCatching { history.loadThreads().firstOrNull() }.getOrNull()
+            if (latest != null && _messages.value.isEmpty()) {
+                threadId = latest.id
+                _messages.value = runCatching { history.loadMessages(latest.id) }.getOrDefault(emptyList())
             }
+            loadedOnce = true
+        }
+        // Salva em vez de só no fim do turno: sair da tela no meio de uma
+        // resposta não pode apagar o que já foi dito.
+        viewModelScope.launch {
+            _messages
+                .debounce(400)
+                .collect { messages ->
+                    if (loadedOnce) runCatching { history.saveThread(threadId, messages) }
+                }
+        }
+    }
+
+    /**
+     * Escreve a conversa atual **antes** de trocar de thread. O salvamento
+     * contínuo tem debounce, e trocar de conversa logo depois de uma resposta
+     * descartaria justamente o último turno.
+     */
+    private fun flushCurrent() {
+        val id = threadId
+        val snapshot = _messages.value
+        if (snapshot.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { history.saveThread(id, snapshot) }
+        }
+    }
+
+    /** Começa uma conversa nova; a atual é arquivada, não apagada. */
+    fun newThread() {
+        if (_messages.value.isEmpty()) return
+        job?.cancel()
+        client.cancelActive()
+        _busy.value = false
+        _activity.value = null
+        _notice.value = null
+        pendingLive = false
+        flushCurrent()
+        _messages.value = emptyList()
+        threadId = System.currentTimeMillis()
+    }
+
+    /** Reabre uma conversa salva. */
+    fun openThread(id: Long) {
+        if (id == threadId && _messages.value.isNotEmpty()) return
+        job?.cancel()
+        client.cancelActive()
+        _busy.value = false
+        _activity.value = null
+        _notice.value = null
+        pendingLive = false
+        flushCurrent()
+        // Suprime o escritor debounced enquanto a nova thread é lida, senão o
+        // conteúdo antigo seria gravado por cima do id recém-aberto.
+        loadedOnce = false
+        threadId = id
+        viewModelScope.launch {
+            _messages.value = runCatching { history.loadMessages(id) }.getOrDefault(emptyList())
+            loadedOnce = true
+        }
+    }
+
+    fun deleteThread(id: Long) {
+        viewModelScope.launch {
+            runCatching { history.deleteThread(id) }
+            if (id == threadId) {
+                _messages.value = emptyList()
+                threadId = System.currentTimeMillis()
+            }
+        }
+    }
+
+    /** Apaga todas as conversas e abre uma vazia. */
+    fun clearHistory() {
+        job?.cancel()
+        client.cancelActive()
+        _busy.value = false
+        _activity.value = null
+        _notice.value = null
+        pendingLive = false
+        // Sem suprimir o escritor, um save em voo poderia recriar o arquivo
+        // logo depois do clearAll.
+        loadedOnce = false
+        _messages.value = emptyList()
+        threadId = System.currentTimeMillis()
+        viewModelScope.launch {
+            runCatching { history.clearAll() }
+            loadedOnce = true
         }
     }
 
@@ -117,13 +248,24 @@ class AiViewModel(
         val text = prompt.trim()
         if (text.isBlank() || _busy.value) return
         job?.cancel()
+        // Cancelar o job não interrompe o socket bloqueante: a Call também.
+        client.cancelActive()
         job = viewModelScope.launch {
             _busy.value = true
+            doing("pensando…")
+            _notice.value = null
             pendingLive = false
             _messages.update { it + UiChatMessage(fromUser = true, text = text) }
             try {
                 // Network + source I/O must stay off the Main thread.
-                val turn = withContext(Dispatchers.IO) { runTurn(text) }
+                // Teto duro: fonte lenta ou travada não pode deixar o chat
+                // girando indefinidamente com a resposta já na tela.
+                val turn = withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(TURN_TIMEOUT_MS) { runTurn(text) }
+                } ?: AssistantTurn(
+                    text = "Demorei demais para concluir. Tente uma busca mais específica.",
+                    mangaHits = emptyList(),
+                )
                 _messages.update { list ->
                     // Streamed answer is already on screen: just attach hits.
                     val last = list.lastOrNull()
@@ -155,8 +297,9 @@ class AiViewModel(
             } finally {
                 pendingLive = false
                 _busy.value = false
-                // Grava o histórico uma vez por turno (não a cada token).
-                runCatching { history.save(_messages.value) }
+                _activity.value = null
+                // O histórico é gravado pelo fluxo contínuo do init, com
+                // debounce: nada a fazer aqui.
             }
         }
     }
@@ -200,12 +343,25 @@ class AiViewModel(
             if (reply.toolCalls.isEmpty()) {
                 val finalText = reply.content?.ifBlank { null } ?: "(sem resposta)"
                 var hits = allHits.distinctBy { it.sourceId to it.url }.take(6)
-                if (hits.isEmpty() && !finalText.isBlank()) {
+                if (hits.isEmpty() && !finalText.isBlank() && tools.hasMangaCandidates(finalText)) {
                     // O modelo respondeu do próprio conhecimento (sem tool):
                     // resolve os títulos citados para virar card tocável.
+                    // A resposta JÁ está na tela aqui, então o usuário precisa
+                    // saber que ainda estamos trabalhando. Só faz sentido
+                    // quando a resposta é mesmo uma lista de mangás — numa
+                    // conversa sobre extensões não há o que procurar, e
+                    // anunciar a busca e depois não mostrar nada confunde.
+                    doing("procurando os títulos citados nas fontes…")
                     hits = tools.resolveTitlesFrom(finalText)
                     if (hits.isNotEmpty()) {
                         android.util.Log.d("AgentTools", "hits resolvidos do texto: ${hits.size}")
+                    } else {
+                        // Dizer que não achou é melhor do que deixar a linha
+                        // de atividade sumir sem explicação.
+                        note(
+                            "Nenhum desses títulos apareceu nas suas fontes instaladas — " +
+                                "confira se a fonte certa está na aba Navegar.",
+                        )
                     }
                 }
                 endTurn()
@@ -325,7 +481,7 @@ class AiViewModel(
         modelName: String,
         history: MutableList<ChatMessage>,
     ): ChatMessage {
-        appendLiveMessage("")
+        doing("escrevendo resposta…")
         val text = StringBuilder()
         val acc = mutableMapOf<Int, ToolAcc>()
         try {
@@ -347,11 +503,15 @@ class AiViewModel(
                 endTurn()
                 throw e
             }
+            // CancelActive() chega aqui como IOException("Canceled"), não como
+            // CancellationException: sem este cheque o turno cairia no fallback
+            // bloqueante e reenviaria o request que o usuário acabou de cancelar.
+            currentCoroutineContext().ensureActive()
             // Sem SSE (ou falha no meio): modo normal (com retry de 429).
             showToolStatus("✍️ escrevendo resposta…")
             val direct = chatWithRetry(base, key, modelName, history)
             history += direct.copy(toolCalls = direct.toolCalls)
-            updateLiveText(direct.content.orEmpty(), direct.toolCalls.isNotEmpty())
+            updateLiveText(direct.content.orEmpty())
             return direct
         }
         val calls = acc.values.mapNotNull { it.toToolCall() }
@@ -362,7 +522,7 @@ class AiViewModel(
             showToolStatus("✍️ escrevendo resposta…")
             val direct = chatWithRetry(base, key, modelName, history)
             history += direct.copy(toolCalls = direct.toolCalls)
-            updateLiveText(direct.content.orEmpty(), direct.toolCalls.isNotEmpty())
+            updateLiveText(direct.content.orEmpty())
             return direct
         }
         val final = ChatMessage(
@@ -372,16 +532,21 @@ class AiViewModel(
         )
         history += final
         // Mantém o texto parcial visível; vira status na execução das tools.
-        updateLiveText(text.toString(), calls.isNotEmpty())
+        updateLiveText(text.toString())
         return final
     }
 
-    private fun appendLiveMessage(text: String) {
+    /**
+     * Cria/atualiza o balão do assistente. Só nasce quando há texto: um
+     * balão reservado antes disso aparecia como card vazio na tela.
+     */
+    private fun updateLiveText(text: String) {
+        if (text.isBlank()) return
         _messages.update { list ->
             val last = list.lastOrNull()
-            // Reaproveita o balão vivo reservado (sem desmontar/remontar).
-            if (pendingLive && last != null && !last.fromUser && !last.isError && last.hits.isEmpty()) {
-                list.dropLast(1) + last.copy(text = text, toolStatus = null)
+            val reusable = last != null && !last.fromUser && !last.isError && last.hits.isEmpty()
+            if (reusable) {
+                list.dropLast(1) + last!!.copy(text = text)
             } else {
                 list + UiChatMessage(fromUser = false, text = text)
             }
@@ -389,26 +554,15 @@ class AiViewModel(
         pendingLive = true
     }
 
-    private fun updateLiveText(text: String, hasTools: Boolean = false) {
-        _messages.update { list ->
-            if (list.isEmpty()) return@update list
-            val last = list.last()
-            if (last.fromUser || last.isError) return@update list
-            list.dropLast(1) + last.copy(text = text, toolStatus = null)
-        }
-    }
-
-    /** Status do balão vivo: uma única bolha, só troca o texto. */
+    /**
+     * Status da atividade: só a linha de baixo da tela.
+     *
+     * Antes isso também escrevia dentro do balão do assistente, o que
+     * duplicava a mensagem e deixava um card vazio no meio da conversa. Um
+     * lugar só, sempre visível.
+     */
     private fun showToolStatus(status: String) {
-        _messages.update { list ->
-            val last = list.lastOrNull()
-            if (last != null && !last.fromUser && !last.isError && last.hits.isEmpty()) {
-                list.dropLast(1) + last.copy(toolStatus = status, text = "")
-            } else {
-                list + UiChatMessage(fromUser = false, text = "", toolStatus = status)
-            }
-        }
-        pendingLive = true
+        doing(status.removePrefix("⏳ ").removePrefix("✍️ "))
     }
 
     /** Fim do turno: remove o balão vazio, mantém o que tem conteúdo. */
@@ -475,12 +629,9 @@ class AiViewModel(
         return tools.openHit(hit)
     }
 
-    fun clear() {
-        job?.cancel()
-        _messages.value = emptyList()
-        viewModelScope.launch {
-            runCatching { history.clear() }
-        }
+    /** Resposta do diálogo de desinstalação (true = remover). */
+    fun confirmExtensionRemoval(allow: Boolean) {
+        tools.resolvePendingAction(allow)
     }
 
     companion object {
@@ -488,5 +639,8 @@ class AiViewModel(
 
         /** Retries for 429/5xx before surfacing the error. */
         private const val RETRIES = 3
+
+        /** Teto do turno inteiro (rede + fontes + desinstalação). */
+        private const val TURN_TIMEOUT_MS = 240_000L
     }
 }

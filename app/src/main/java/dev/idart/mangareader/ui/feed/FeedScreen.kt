@@ -69,6 +69,7 @@ class FeedViewModel(
     val intervalHours: Flow<Long> = repository.intervalHours
     val lastRefresh: Flow<Long> = repository.lastRefresh
     val refreshing: Flow<Boolean> = repository.refreshing
+    val stage: Flow<String?> = repository.stage
     val exaKey: Flow<String> = exaSettings.apiKey
 
     init {
@@ -97,6 +98,7 @@ fun FeedScreen(
     val error by viewModel.error.collectAsState(initial = null)
     val lastRefresh by viewModel.lastRefresh.collectAsState(initial = 0L)
     val refreshing by viewModel.refreshing.collectAsState(initial = false)
+    val stage by viewModel.stage.collectAsState(initial = null)
     var showSettings by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -147,16 +149,54 @@ fun FeedScreen(
                     }
                 }
             }
-            if (!refreshing && items.isEmpty() && error == null) {
+            if (refreshing && items.isEmpty()) {
+                // Antes este caso não renderizava nada: com o feed vazio e o
+                // refresh rodando, só existia o spinner minúsculo do topo — sem
+                // texto algum, parecia travamento.
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    CircularProgressIndicator()
+                    Text(
+                        text = stage ?: "Gerando recomendações a partir da sua biblioteca…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else if (!refreshing && items.isEmpty() && error == null) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "Gerando recomendações a partir da sua biblioteca…",
+                        "Toque em atualizar para gerar recomendações a partir da sua biblioteca.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(24.dp),
                     )
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    val stageLabel = stage
+                    if (refreshing && stageLabel != null) {
+                        // O feed antigo continua visível; a linha diz o que está
+                        // rodando, em vez de deixar o usuário adivinhando.
+                        item(key = "feed-stage") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Text(
+                                    text = stageLabel,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                     items(items, key = { it.id }) { item ->
                         ListItem(
                             headlineContent = { Text(item.title) },

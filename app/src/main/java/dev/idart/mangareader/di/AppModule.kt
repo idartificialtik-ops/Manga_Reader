@@ -34,7 +34,10 @@ import dev.idart.mangareader.ui.ai.AgentTools
 import dev.idart.mangareader.ui.ai.AiClient
 import dev.idart.mangareader.ui.ai.AiSettings
 import dev.idart.mangareader.ui.ai.ChatHistoryStore
+import dev.idart.mangareader.ui.browse.AiQueryExpander
 import dev.idart.mangareader.ui.browse.BrowseFilterRepository
+import dev.idart.mangareader.ui.browse.FederatedSearch
+import dev.idart.mangareader.ui.browse.SourceHealthStore
 import dev.idart.mangareader.ui.feed.ExaClient
 import dev.idart.mangareader.ui.feed.ExaSettings
 import dev.idart.mangareader.ui.feed.FeedRepository
@@ -79,10 +82,15 @@ class AppModule(val app: Application) : InjektModule {
         addSingletonFactory { ExaSettings(app) }
         addSingletonFactory { ExaClient() }
         addSingletonFactory { FeedRepository(app) }
+        addSingletonFactory { SourceHealthStore(app) }
+        addSingletonFactory { AiQueryExpander(get(), get()) }
+        addSingletonFactory { FederatedSearch(get(), get(), get()) }
         addSingletonFactory {
             FeedUpdater(get(), get(), get(), get(), get(), get(), get(), get())
         }
-        addSingletonFactory { AgentTools(get(), get(), get(), get(), get()) }
+        addSingletonFactory {
+            AgentTools(get(), get(), get(), get(), get(), get(), get(), get(), get(), get())
+        }
         addSingletonFactory { PageTranslator(app, get(), get(), get(), get(), get()) }
     }
 }

@@ -220,7 +220,12 @@ fun MangaReaderNavGraph() {
                         navController.navigate(Reader(route.mangaId, chapterId))
                     },
                     onMangaClick = { mangaId ->
-                        navController.navigate(MangaDetail(mangaId))
+                        // Sugestões substituem a tela em vez de empilhar: sem
+                        // isto, navegar por 3 recomendados exigia 3 voltas para
+                        // chegar à lista de origem.
+                        navController.navigate(MangaDetail(mangaId)) {
+                            popUpTo<MangaDetail> { inclusive = true }
+                        }
                     },
                 )
             }

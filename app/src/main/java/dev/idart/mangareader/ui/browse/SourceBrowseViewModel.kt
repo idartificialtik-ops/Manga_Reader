@@ -28,11 +28,19 @@ data class SourceBrowseUiState(
     val isLoading: Boolean = true,
     val isAppending: Boolean = false,
     val error: String? = null,
+    /** Expand the typed query into several terms with the model. */
+    val useAi: Boolean = true,
+    val searchingWithAi: Boolean = false,
+    val aiPhase: String? = null,
+    val aiVariants: List<AiQueryExpander.Variant> = emptyList(),
+    val aiStats: String? = null,
 )
 
 class SourceBrowseViewModel(
     private val browse: BrowseSourceCatalogue,
     private val ensureMangaInDb: EnsureMangaInDb,
+    private val federated: FederatedSearch,
+    private val expander: AiQueryExpander,
     sourceManager: SourceManager,
     private val sourceId: Long,
     initialQuery: String = "",
@@ -122,12 +130,90 @@ class SourceBrowseViewModel(
     }
 
     fun search() {
-        reload()
+        if (_state.value.useAi && _state.value.query.isNotBlank()) {
+            federatedSearch()
+        } else {
+            reload()
+        }
+    }
+
+    fun setUseAi(value: Boolean) {
+        _state.update { it.copy(useAi = value) }
+    }
+
+    /**
+     * Fans the typed query out into several terms (languages, synonyms) and
+     * searches this one source with all of them, merging into a single list.
+     *
+     * Pagination is intentionally left out: page 2 of five different queries
+     * has no sensible order, so the AI mode stops at the first page of each
+     * term and says so in the UI.
+     */
+    private fun federatedSearch() {
+        val query = _state.value.query.trim()
+        if (query.isBlank()) return
+        page = 0
+        _state.update {
+            it.copy(
+                items = emptyList(),
+                error = null,
+                isLoading = true,
+                searchingWithAi = true,
+                aiPhase = "IA preparando as buscas…",
+                aiVariants = emptyList(),
+            )
+        }
+        viewModelScope.launch {
+            val variants = expander.expand(query, extraVariants = AI_EXTRA_VARIANTS)
+            val sourceName = _state.value.sourceName
+            _state.update { it.copy(aiPhase = "procurando em $sourceName…", aiVariants = variants) }
+            val result = federated.search(
+                variants = variants,
+                onlySourceId = sourceId,
+                filters = filters,
+                deadlineMs = FederatedSearch.DEFAULT_DEADLINE_MS,
+            )
+            val outcome = result.sections.firstOrNull { it.sourceId == sourceId }
+            if (outcome?.searched == false) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        searchingWithAi = false,
+                        aiPhase = null,
+                        error = outcome?.skipReason ?: "Fonte indisponível",
+                    )
+                }
+                return@launch
+            }
+            val merged = result.merged.flatMap { work -> work.hits.map { it.manga } }
+            _state.update {
+                it.copy(
+                    items = merged,
+                    // No further pages: the list is already a union of results.
+                    hasNextPage = false,
+                    isLoading = false,
+                    searchingWithAi = false,
+                    aiPhase = null,
+                    error = outcome?.error,
+                    aiStats = "${merged.size} resultado(s) com ${variants.size} termo(s) de busca",
+                )
+            }
+        }
     }
 
     fun reload() {
         page = 0
-        _state.update { it.copy(items = emptyList(), error = null, isLoading = true) }
+        _state.update {
+            it.copy(
+                items = emptyList(),
+                error = null,
+                isLoading = true,
+                searchingWithAi = false,
+                aiPhase = null,
+                aiVariants = emptyList(),
+                aiStats = null,
+            )
+        }
         loadPage(append = false)
     }
 
@@ -188,5 +274,10 @@ class SourceBrowseViewModel(
             }
         }
         return friendlySourceError(e, sourceId)
+    }
+
+    private companion object {
+        /** Extra queries the model adds on top of the literal one. */
+        const val AI_EXTRA_VARIANTS = 4
     }
 }

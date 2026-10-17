@@ -77,9 +77,39 @@ class FeedRepository(app: Application) {
     private val _refreshing = MutableStateFlow(false)
     val refreshing: Flow<Boolean> = _refreshing.asStateFlow()
 
+    /**
+     * Etapa atual da geração, exibida junto do spinner. Um spinner sem texto
+     * parece travamento, e o pipeline tem etapas lentas de verdade (IA +
+     * resolução em cada fonte).
+     */
+    private val _stage = MutableStateFlow<String?>(null)
+    val stage: Flow<String?> = _stage.asStateFlow()
+
+    fun setStage(value: String?) {
+        _stage.update { value }
+    }
+
     fun setRefreshing(value: Boolean) {
         _refreshing.update { value }
+        if (!value) _stage.update { null }
     }
+
+    /**
+     * Appends one item while a refresh is running, so cards appear as they are
+     * resolved instead of all at once at the end of the pipeline.
+     *
+     * Only used when starting from an empty feed: with a cached feed already on
+     * screen, appending would grow the list and then replace it.
+     */
+    fun publishPartial(item: FeedItem) {
+        val current = _items.value.toMutableList()
+        current.removeAll { it.id == item.id }
+        current += item
+        writeStore(FeedStore(current, _error.value))
+        _items.update { current }
+    }
+
+    fun isEmpty(): Boolean = _items.value.isEmpty()
 
     fun saveItems(items: List<FeedItem>, error: String? = null) {
         writeStore(FeedStore(items, error))

@@ -549,7 +549,15 @@ private fun paletteOf(bitmap: Bitmap): CoverPalette {
         buckets[quantized] = (buckets[quantized] ?: 0) + 1
     }
     if (buckets.isEmpty()) return CoverPalette(Color.Gray, Color.Gray, tintable(Color.Gray))
-    val dominantKey = buckets.maxBy { it.value }.key
+    // A cor mais frequente da capa quase nunca é a arte: é a moldura. Fundo
+    // branco dava vermelho (matiz inventado no acromático) e fundo quase
+    // preto dava tela preta, ignorando a cor real da arte. O matiz sai da cor
+    // mais frequente entre as que **descrevem** a capa.
+    val dominantKey = buckets.entries
+        .filterNot { isBackdrop(it.key) }
+        .maxByOrNull { it.value }
+        ?.key
+        ?: buckets.maxBy { it.value }.key
     // Vibrant = populous and saturated, with readable lightness.
     var vibrantKey = dominantKey
     var bestScore = -1.0
@@ -577,13 +585,42 @@ private fun paletteOf(bitmap: Bitmap): CoverPalette {
  * Deixa a cor apta a virar fundo: garante luminosidade mínima e uma
  * saturação mínima, preservando o matiz. Sem isso, capas escuras/acinzentadas
  * somem no preto do modo AMOLED.
+ *
+ * Exceção importante: cor **acromática** (cinza, branco, preto) não tem
+ * matiz — o HSL devolve H=0. Forçar saturação ali não preserva o matiz, ela
+ * **inventa** um: toda capa de fundo branco saía marrom/vermelha, com um
+ * "pouco de marrom" que não estava na arte. Acromático fica quase neutro.
  */
 private fun tintable(color: Color): Color {
     val hsl = FloatArray(3)
     ColorUtils.colorToHSL(color.toArgb(), hsl)
-    hsl[1] = hsl[1].coerceAtLeast(0.34f) // saturação
+    hsl[1] = if (hsl[1] < ACHROMATIC_SATURATION) {
+        // Só o suficiente para não ficar Dead chapado, sem fabricar matiz.
+        hsl[1].coerceAtMost(0.10f)
+    } else {
+        hsl[1].coerceAtLeast(0.34f)
+    }
     hsl[2] = hsl[2].coerceIn(0.46f, 0.60f) // luminosidade
     return Color(ColorUtils.HSLToColor(hsl))
+}
+
+/** Abaixo disto a cor é cinza/branco/preto: sem matiz a preservar. */
+private const val ACHROMATIC_SATURATION = 0.14f
+
+/**
+ * True for the frame colors of a cover — almost white or almost black.
+ *
+ * They occupy most of the pixels but say nothing about the artwork, so they
+ * must not become the screen's color: a near-white frame made every cover
+ * look reddish (invented hue) and a near-black one left the screen black
+ * while the art was full of color.
+ */
+private fun isBackdrop(key: Int): Boolean {
+    val (r, g, b) = expandKey(key)
+    val max = maxOf(r, g, b) / 255.0
+    val min = minOf(r, g, b) / 255.0
+    val lightness = (max + min) / 2.0
+    return lightness < 0.16 || lightness > 0.88
 }
 
 private fun expandKey(key: Int): Triple<Int, Int, Int> {

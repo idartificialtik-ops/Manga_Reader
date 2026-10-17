@@ -283,7 +283,15 @@ fun SourceBrowseScreen(
     onWebViewClick: (sourceId: Long) -> Unit = {},
 ) {
     val viewModel: SourceBrowseViewModel = injektViewModel {
-        SourceBrowseViewModel(Injekt.get(), Injekt.get(), Injekt.get(), sourceId, initialQuery)
+        SourceBrowseViewModel(
+            Injekt.get(),
+            Injekt.get(),
+            Injekt.get(),
+            Injekt.get(),
+            Injekt.get(),
+            sourceId,
+            initialQuery,
+        )
     }
     val state by viewModel.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -348,6 +356,54 @@ fun SourceBrowseScreen(
                 },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             )
+            if (state.query.isNotBlank()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = state.useAi,
+                        onClick = { viewModel.setUseAi(!state.useAi) },
+                        label = { Text("Buscar com IA") },
+                    )
+                    Text(
+                        text = if (state.useAi) {
+                            "vários termos em paralelo"
+                        } else {
+                            "só o termo digitado"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            state.aiPhase?.let { phase ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text(
+                        text = phase,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            state.aiStats?.let { stats ->
+                Text(
+                    text = stats + if (state.aiVariants.size > 1) {
+                        " · " + state.aiVariants.joinToString(" · ") { it.query }
+                    } else {
+                        ""
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                )
+            }
             TabRow(selectedTabIndex = state.tab.ordinal) {
                 Tab(
                     selected = state.tab == CatalogueTab.POPULAR,
@@ -364,7 +420,8 @@ fun SourceBrowseScreen(
             }
             Box(modifier = Modifier.fillMaxSize().weight(1f)) {
                 when {
-                    state.isLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                    state.isLoading && !state.searchingWithAi ->
+                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     state.error != null && state.items.isEmpty() -> Column(
                         modifier = Modifier.align(Alignment.Center).padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,

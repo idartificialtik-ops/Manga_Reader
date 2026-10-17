@@ -46,7 +46,10 @@ class FeedUpdater(
     suspend fun refresh() = withContext(Dispatchers.IO) {
         feedRepository.setRefreshing(true)
         try {
-            val items = withTimeout(300_000L) { buildFeed() }
+            // 5 min de spinner cega parece travamento; com a publicação
+            // progressiva abaixo, 2,5 min já cobre o pior caso (IA lenta +
+            // fontes resolvendo em paralelo).
+            val items = withTimeout(150_000L) { buildFeed() }
             feedRepository.saveItems(items)
             feedRepository.markRefreshed()
             Log.i(TAG, "feed atualizado: ${items.size} itens")
@@ -54,7 +57,7 @@ class FeedUpdater(
             if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
             Log.w(TAG, "feed falhou: ${e.message}")
             val message = if (e is kotlinx.coroutines.TimeoutCancellationException) {
-                "Tempo esgotado (5 min). Tente de novo ou verifique a rede do aparelho."
+                "Tempo esgotado (2 min e meio). Tente de novo ou verifique a rede do aparelho."
             } else {
                 e.message ?: "Falha ao atualizar o feed"
             }
@@ -76,6 +79,7 @@ class FeedUpdater(
         if (favorites.isEmpty()) {
             error("Favorite mangás na biblioteca para gerar recomendações.")
         }
+        feedRepository.setStage("lendo sua biblioteca (${favorites.size} títulos)…")
         val profile = favorites.take(20).joinToString("\n") { manga ->
             val genres = manga.genre?.takeIf { it.isNotEmpty() }?.joinToString() ?: "gênero desconhecido"
             "- ${manga.title} ($genres)"
@@ -83,8 +87,10 @@ class FeedUpdater(
 
         // Passo 1: o modelo decide pesquisar na web ou recomendar direto.
         Log.i(TAG, "feed: decidindo (perfil ${favorites.size} favs)")
+        feedRepository.setStage("consultando o modelo…")
         val decision = decide(baseUrl, apiKey, model, profile)
         val webContext = if (decision != null && exaSettings.apiKey.first().isNotBlank()) {
+            feedRepository.setStage("pesquisando lançamentos na web…")
             runCatching {
                 val results = withContext(Dispatchers.IO) {
                     exaSettings.refresh()
@@ -104,12 +110,36 @@ class FeedUpdater(
 
         // Passo 2: recomendações finais em JSON.
         Log.i(TAG, "feed: recomendando (exa=${webContext.isNotBlank()})")
+        feedRepository.setStage("pedindo recomendações ao modelo…")
         val recs = recommend(baseUrl, apiKey, model, profile, webContext)
         if (recs.isEmpty()) error("O provedor não retornou recomendações.")
         Log.i(TAG, "feed: resolvendo ${recs.size} nas fontes (paralelo)")
+        feedRepository.setStage("procurando nas suas fontes…")
+        // Id estável: mesmo item na publicação parcial e na lista final, então
+        // o card é atualizado no lugar quando o motivo ancorado chega.
+        val startedAt = System.currentTimeMillis()
+        // Só publica aos poucos partindo do feed vazio: com cache na tela,
+        // anexar faria a lista crescer e encolher no fim.
+        val publishProgressive = feedRepository.isEmpty()
         val resolved = supervisorScope {
-            recs.take(MAX_ITEMS).map { rec ->
-                async { resolve(rec) }
+            recs.take(MAX_ITEMS).mapIndexed { index, rec ->
+                async {
+                    val item = resolve(rec)
+                    if (publishProgressive) {
+                        feedRepository.publishPartial(
+                            FeedItem(
+                                id = "$startedAt-$index-${rec.title.hashCode()}",
+                                title = item.realTitle,
+                                reason = rec.reason,
+                                mangaId = item.mangaId,
+                                sourceId = item.hit?.sourceId,
+                                coverUrl = item.hit?.thumbnailUrl,
+                                query = rec.title,
+                            ),
+                        )
+                    }
+                    item
+                }
             }.awaitAll()
         }
         // Passo 3: ancora cada motivo na sinopse REAL da obra encontrada
@@ -118,10 +148,11 @@ class FeedUpdater(
             .groupingBy { it }.eachCount()
             .entries.sortedByDescending { it.value }.take(3).map { it.key }
         Log.i(TAG, "feed: ancorando motivos")
+        feedRepository.setStage("escrevendo os motivos…")
         val reasons = groundReasons(baseUrl, apiKey, model, resolved, topGenres)
         return resolved.mapIndexed { index, item ->
             FeedItem(
-                id = "${System.currentTimeMillis()}-$index-${item.rec.title.hashCode()}",
+                id = "$startedAt-$index-${item.rec.title.hashCode()}",
                 title = item.realTitle,
                 reason = reasons.getOrNull(index).takeUnless { it.isNullOrBlank() } ?: item.rec.reason,
                 mangaId = item.mangaId,

@@ -1,15 +1,19 @@
 package dev.idart.mangareader.sources.extension
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.util.Log
 import dev.idart.mangareader.domain.source.service.SourceManager
 import keiyoushi.utils.SOURCE_PREFS_PREFIX
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Discovers installed extension APKs, wraps their sources in [ExtensionSource]
@@ -34,6 +38,78 @@ class ExtensionManager(
 
     private val _installed = MutableStateFlow<List<ExtensionInfo>>(emptyList())
     val installed: StateFlow<List<ExtensionInfo>> = _installed.asStateFlow()
+
+    sealed interface UninstallOutcome {
+        data class Done(val cleanedSources: Int) : UninstallOutcome
+
+        /** User backed out, or the system dialog never came. */
+        data object Cancelled : UninstallOutcome
+
+        data class Failed(val message: String) : UninstallOutcome
+    }
+
+    /**
+     * Removes an extension through the system uninstall dialog and waits for
+     * the result.
+     *
+     * Why the dialog: on modern SDKs the callback-based
+     * `PackageInstaller.uninstall` overloads are gone — only the
+     * `IntentSender` variants remain, and those hand the consent UI back to
+     * the caller. Asking the system is both the reliable path and the one the
+     * user expects for a destructive action.
+     */
+    suspend fun uninstall(packageName: String): UninstallOutcome {
+        val sourceIds = _installed.value
+            .firstOrNull { it.packageName == packageName }
+            ?.sources
+            ?.map { it.id }
+            .orEmpty()
+        if (!isInstalled(packageName)) {
+            return UninstallOutcome.Failed("extensão não encontrada")
+        }
+        val launched = runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            true
+        }.getOrElse { return UninstallOutcome.Failed(it.message ?: "não consegui abrir a tela do sistema") }
+
+        if (!launched) return UninstallOutcome.Cancelled
+        val removed = awaitRemoval(packageName)
+        if (!removed) return UninstallOutcome.Cancelled
+        clearPreferences(sourceIds)
+        refresh()
+        return UninstallOutcome.Done(sourceIds.size)
+    }
+
+    /** Waits for the package to disappear from the system. */
+    private suspend fun awaitRemoval(packageName: String): Boolean {
+        return withTimeoutOrNull(UNINSTALL_WAIT_MS) {
+            while (true) {
+                val stillThere = runCatching {
+                    context.packageManager.getPackageInfo(packageName, 0)
+                    true
+                }.getOrDefault(false)
+                if (!stillThere) return@withTimeoutOrNull true
+                delay(400)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            false
+        } ?: false
+    }
+
+    private fun isPackageInstalled(packageName: String): Boolean = runCatching {
+        context.packageManager.getPackageInfo(packageName, 0)
+        true
+    }.getOrDefault(false)
+
+    /** Label + package of an installed extension, for the assistant. */
+    fun installedBrief(): List<Pair<String, String>> =
+        _installed.value.map { it.label to it.packageName }
+
+    fun isInstalled(packageName: String): Boolean =
+        _installed.value.any { it.packageName == packageName }
 
     /**
      * Deletes the `source_<id>` preference files of the given sources.
@@ -81,5 +157,8 @@ class ExtensionManager(
 
     private companion object {
         private const val TAG = "ExtensionManager"
+
+        /** Tempo que o usuário pode levar no diálogo do sistema. */
+        private const val UNINSTALL_WAIT_MS = 180_000L
     }
 }

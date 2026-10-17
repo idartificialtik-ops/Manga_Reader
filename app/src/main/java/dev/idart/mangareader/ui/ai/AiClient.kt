@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -101,6 +102,24 @@ class AiClient(
     },
 ) {
 
+    /**
+     * Última chamada em andamento. `execute()` e a leitura do stream são
+     * bloqueantes: cancelar a corrotina NÃO interrompe o socket, e o usuário
+     * via "escrevendo resposta…" continuar por minutos depois de limpar o
+     * chat. Cancelar a Call é o que derruba a leitura na hora.
+     */
+    @Volatile
+    private var activeCall: Call? = null
+
+    /** Aborta a requisição em andamento, se houver. Thread-safe. */
+    fun cancelActive() {
+        runCatching { activeCall?.cancel() }
+        activeCall = null
+    }
+
+    private fun call(request: Request): Call =
+        client.newCall(request).also { activeCall = it }
+
     suspend fun chat(
         baseUrl: String,
         apiKey: String,
@@ -139,7 +158,7 @@ class AiClient(
     }
 
     private fun executeChat(request: Request): ChatMessage {
-        client.newCall(request).execute().use { response ->
+        call(request).execute().use { response ->
             val body = response.body?.string() ?: throw IllegalStateException("Resposta vazia")
             if (!response.isSuccessful) {
                 val detail = runCatching {
@@ -196,7 +215,7 @@ class AiClient(
             .addHeader("Authorization", "Bearer $apiKey")
             .get()
             .build()
-        client.newCall(request).execute().use { response ->
+        call(request).execute().use { response ->
             val body = response.body?.string() ?: throw IllegalStateException("Resposta vazia")
             if (!response.isSuccessful) {
                 throw IllegalStateException("HTTP ${response.code}: ${body.take(200)}")
@@ -283,7 +302,7 @@ class AiClient(
             .addHeader("Accept", "text/event-stream")
             .post(payload.toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        client.newCall(request).execute().use { response ->
+        call(request).execute().use { response ->
             if (!response.isSuccessful) {
                 val body = response.body?.string().orEmpty()
                 val detail = runCatching {

@@ -2,12 +2,14 @@ package dev.idart.mangareader.ui.ai
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,7 +23,10 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -39,6 +44,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -60,6 +66,8 @@ import dev.idart.mangareader.ui.injektViewModel
 import kotlinx.coroutines.launch
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.text.DateFormat
+import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,10 +80,15 @@ fun AiScreen(
     }
     val messages by viewModel.messages.collectAsState()
     val busy by viewModel.busy.collectAsState()
+    val activity by viewModel.activity.collectAsState()
+    val notice by viewModel.notice.collectAsState()
+    val pendingRemoval by viewModel.pendingExtensionRemoval.collectAsState()
+    val threads by viewModel.threads.collectAsState()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var input by remember { mutableStateOf("") }
     var showSettings by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -93,8 +106,13 @@ fun AiScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.clear() }) {
-                        Icon(Icons.Filled.Delete, contentDescription = "Limpar conversa")
+                    // Conversa atual fica salva ao trocar: o botão é "nova",
+                    // não "apagar" — apagar vive no histórico.
+                    IconButton(onClick = { viewModel.newThread() }) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Nova conversa")
+                    }
+                    IconButton(onClick = { showHistory = true }) {
+                        Icon(Icons.Filled.History, contentDescription = "Histórico de conversas")
                     }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Filled.Settings, contentDescription = "Configurar IA")
@@ -132,9 +150,31 @@ fun AiScreen(
                 }
                 if (busy) {
                     item {
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        // Spinner sozinho não diz nada: o usuário achava que o
+                        // app tinha travado.
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Text(
+                                text = activity ?: "pensando…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
+                    }
+                } else if (notice != null) {
+                    item {
+                        // Fica depois que a atividade acaba: sumir sem
+                        // explicação não diz nada sobre o resultado.
+                        Text(
+                            text = notice.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        )
                     }
                 }
             }
@@ -183,6 +223,46 @@ fun AiScreen(
             onDismiss = { showSettings = false },
         )
     }
+
+    if (showHistory) {
+        ChatHistorySheet(
+            threads = threads,
+            onOpen = { id ->
+                showHistory = false
+                viewModel.openThread(id)
+            },
+            onDelete = viewModel::deleteThread,
+            onClearAll = {
+                showHistory = false
+                viewModel.clearHistory()
+            },
+            onDismiss = { showHistory = false },
+        )
+    }
+
+    // O assistente pediu para remover uma extensão: o usuário decide.
+    pendingRemoval?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { viewModel.confirmExtensionRemoval(false) },
+            title = { Text("Remover extensão?") },
+            text = {
+                Text(
+                    "O assistente quer desinstalar “${pending.label}”. " +
+                        "A extensão e as configurações salvas nas fontes dela serão apagadas.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmExtensionRemoval(true) }) {
+                    Text("Remover", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.confirmExtensionRemoval(false) }) {
+                    Text("Cancelar")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -195,28 +275,26 @@ private fun ChatBubble(
         horizontalAlignment = if (msg.fromUser) Alignment.End else Alignment.Start,
     ) {
         Card(
-            colors = if (msg.fromUser) {
-                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-            } else if (msg.isError) {
-                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-            } else {
-                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            // Par container/texto declarado de propósito: depender da resolução
+            // automática deixava a resposta do assistente escura demais para ler
+            // no tema tingido pela capa.
+            colors = when {
+                msg.fromUser -> CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                msg.isError -> CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                else -> CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             },
             modifier = Modifier.fillMaxWidth(0.92f),
         ) {
-            if (msg.toolStatus != null) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(12.dp),
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp))
-                    Text(
-                        msg.toolStatus,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-            } else if (msg.fromUser || msg.isError) {
+            if (msg.fromUser || msg.isError) {
                 Text(
                     msg.text,
                     style = MaterialTheme.typography.bodyMedium,
@@ -246,6 +324,69 @@ private fun ChatBubble(
                 },
                 modifier = Modifier.fillMaxWidth(0.92f).clickable { onMangaOpen(hit) },
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatHistorySheet(
+    threads: List<ChatThread>,
+    onOpen: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
+    onClearAll: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Histórico",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (threads.isNotEmpty()) {
+                    TextButton(onClick = onClearAll) { Text("Limpar tudo") }
+                }
+            }
+            if (threads.isEmpty()) {
+                Text(
+                    "Nenhuma conversa salva ainda.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(16.dp),
+                )
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+                    items(threads, key = { it.id }) { thread ->
+                        ListItem(
+                            headlineContent = { Text(thread.title, maxLines = 1) },
+                            supportingContent = {
+                                Text(
+                                    "${thread.messages.size} mensagens • " +
+                                        remember(thread.updatedAt) {
+                                            DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                                                .format(Date(thread.updatedAt))
+                                        },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
+                            trailingContent = {
+                                IconButton(onClick = { onDelete(thread.id) }) {
+                                    Icon(Icons.Filled.Delete, contentDescription = "Apagar conversa")
+                                }
+                            },
+                            modifier = Modifier.clickable { onOpen(thread.id) },
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }

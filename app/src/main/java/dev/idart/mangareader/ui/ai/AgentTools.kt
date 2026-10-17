@@ -8,12 +8,24 @@ import dev.idart.mangareader.domain.source.service.SourceManager
 import dev.idart.mangareader.source.model.FilterList
 import dev.idart.mangareader.source.model.SManga
 import dev.idart.mangareader.source.model.SMangaImpl
+import dev.idart.mangareader.sources.extension.ExtensionManager
+import dev.idart.mangareader.sources.extension.repo.ExtensionInstaller
+import dev.idart.mangareader.sources.extension.repo.ExtensionRepo
+import dev.idart.mangareader.sources.extension.repo.ExtensionRepoStore
+import dev.idart.mangareader.ui.browse.SourceHealthStore
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Tools exposed to the manga assistant: real search across the user's
@@ -25,7 +37,44 @@ class AgentTools(
     private val ensureMangaInDb: EnsureMangaInDb,
     private val mangaRepository: MangaRepository,
     private val client: AiClient,
+    private val extensionRepo: ExtensionRepo,
+    private val extensionRepoStore: ExtensionRepoStore,
+    private val extensionManager: ExtensionManager,
+    private val extensionInstaller: ExtensionInstaller,
+    /** Shared with the search screens: what one learns, the other uses. */
+    private val health: SourceHealthStore,
 ) {
+
+    /**
+     * Destructive action waiting for the user's tap. The model cannot skip it:
+     * [awaitDecision] suspends until the UI answers, and silence means "no".
+     */
+    data class PendingAction(
+        val id: Long,
+        val packageName: String,
+        val label: String,
+        val sourceCount: Int,
+    )
+
+    private val _pendingAction = MutableStateFlow<PendingAction?>(null)
+    val pendingAction: StateFlow<PendingAction?> = _pendingAction.asStateFlow()
+
+    /** Answered by the confirmation dialog. */
+    fun resolvePendingAction(allow: Boolean) {
+        val pending = _pendingAction.value ?: return
+        decision?.complete(allow)
+        decision = null
+        _pendingAction.value = null
+    }
+
+    private var decision: CompletableDeferred<Boolean>? = null
+
+    /** Suspends the tool until the user answers; silence counts as "no". */
+    private suspend fun awaitDecision(): Boolean {
+        val deferred = CompletableDeferred<Boolean>()
+        decision = deferred
+        return withTimeoutOrNull(CONFIRM_TIMEOUT_MS) { deferred.await() } ?: false
+    }
 
     fun definitions(): List<ToolDefinition> {
         return listOf(
@@ -73,14 +122,48 @@ class AgentTools(
                     ),
                 ),
             ),
+            ToolDefinition(
+                function = FunctionDefinition(
+                    name = "search_extensions",
+                    description = "Procura extensões de fontes no catálogo configurado pelo usuário (ex.: Keiyoushi), " +
+                        "por nome, pacote ou idioma. Use antes de instalar qualquer coisa.",
+                    parameters = client.toolJson(
+                        mapOf(
+                            "query" to ("string" to "Nome da fonte, da extensão ou idioma (ex.: 'Scanlator BR', 'pt-BR')"),
+                        ),
+                        requiredExtra = listOf("query"),
+                    ),
+                ),
+            ),
+            ToolDefinition(
+                function = FunctionDefinition(
+                    name = "install_extension",
+                    description = "Instala uma extensão pelo packageName EXATO devolvido por search_extensions. " +
+                        "O Android pede a confirmação do usuário na tela de instalação. " +
+                        "Nunca invente um packageName: se não veio da busca, não instale.",
+                    parameters = client.toolJson(
+                        mapOf("packageName" to ("string" to "Package exato da busca, ex.: eu.kanade.tachiyomi.extension.all.mangafire")),
+                        requiredExtra = listOf("packageName"),
+                    ),
+                ),
+            ),
+            ToolDefinition(
+                function = FunctionDefinition(
+                    name = "uninstall_extension",
+                    description = "Remove uma extensão INSTALADA. DESTRUTIVO: o app pede confirmação ao usuário " +
+                        "antes de remover, e as configurações das fontes dela são apagadas. " +
+                        "Só chame quando o usuário pedir explicitamente para desinstalar.",
+                    parameters = client.toolJson(
+                        mapOf("packageName" to ("string" to "Package da extensão instalada")),
+                        requiredExtra = listOf("packageName"),
+                    ),
+                ),
+            ),
         )
     }
 
     /** Últimos resultados do search_manga (para add_to_library por número). */
     private var lastHits: List<MangaHit> = emptyList()
-
-    /** sourceId -> instante da última falha (cooldown de rede). */
-    private val sourceFailures = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
     suspend fun execute(name: String, argsJson: String): Pair<String, List<MangaHit>> {
         return when (name) {
@@ -137,8 +220,127 @@ class AgentTools(
                     "Falha ao adicionar: ${e.message}" to emptyList()
                 }
             }
+            "search_extensions" -> {
+                val query = client.argString(argsJson, "query") ?: return "query ausente" to emptyList()
+                runCatching { searchExtensions(query) }
+                    .getOrElse { "Falha ao ler o catálogo: ${it.message}" } to emptyList()
+            }
+            "install_extension" -> {
+                val pkg = client.argString(argsJson, "packageName")?.trim()
+                    ?: return "packageName ausente" to emptyList()
+                runCatching { installExtension(pkg) }
+                    .getOrElse { "Falha ao instalar: ${it.message}" } to emptyList()
+            }
+            "uninstall_extension" -> {
+                val pkg = client.argString(argsJson, "packageName")?.trim()
+                    ?: return "packageName ausente" to emptyList()
+                runCatching { uninstallExtension(pkg) }
+                    .getOrElse { "Falha ao remover: ${it.message}" } to emptyList()
+            }
             else -> "Ferramenta desconhecida: $name" to emptyList()
         }
+    }
+
+    /**
+     * Extensions in the user's repos matching [query] (name, package, language
+     * or one of its source names). Cached indexes, so no network when the
+     * catalog was already fetched.
+     */
+    private suspend fun searchExtensions(query: String): String {
+        val repos = extensionRepoStore.currentRepos()
+        if (repos.isEmpty()) return "Nenhum repositório de extensões configurado."
+        val installed = extensionManager.installedBrief().toMap()
+        val needle = query.trim().lowercase()
+        val matches = repos.flatMap { repo ->
+            runCatching { extensionRepo.fetchIndex(repo.indexUrl) }.getOrDefault(emptyList())
+        }.filter { ext ->
+            ext.langs.any { it.contains(needle) } ||
+                ext.name.lowercase().contains(needle) ||
+                ext.packageName.lowercase().contains(needle) ||
+                ext.sources.any { it.name.lowercase().contains(needle) }
+        }.take(15)
+        if (matches.isEmpty()) return "Nenhuma extensão encontrada para \"$query\"."
+        return matches.joinToString("\n") { ext ->
+            val state = if (installed.containsKey(ext.packageName)) "instalada" else "não instalada"
+            "- ${ext.name} [${ext.langs.joinToString("/")}] v${ext.versionName} " +
+                "($state) package=${ext.packageName}"
+        }
+    }
+
+    /**
+     * Installs an extension **from the configured catalog only**.
+     *
+     * The APK URL is resolved from the index by package name — never taken
+     * from the model — so the assistant cannot point the installer at an
+     * arbitrary host. Android still shows its own install confirmation.
+     */
+    private suspend fun installExtension(packageName: String): String {
+        val entry = findInCatalog(packageName)
+            ?: return "Nenhuma extensão com o pacote \"$packageName\" existe no catálogo. " +
+                "Use search_extensions para achar o pacote exato."
+        if (extensionManager.isInstalled(packageName)) {
+            return "${entry.name} já está instalada (v${entry.versionName} no catálogo)."
+        }
+        val apkUrl = entry.resources.apkUrl
+        if (apkUrl.isBlank()) return "${entry.name} não tem APK disponível no repositório."
+        return extensionInstaller.downloadAndInstall(
+            packageName = packageName,
+            apkUrl = apkUrl,
+            fileName = apkUrl.substringAfterLast('/'),
+            onProgress = { _, _ -> },
+        ).fold(
+            onSuccess = {
+                "APK de ${entry.name} baixado. O Android vai pedir a confirmação da instalação; " +
+                    "depois a fonte aparece em Navegar."
+            },
+            onFailure = { "Falha ao baixar ${entry.name}: ${it.message}" },
+        )
+    }
+
+    /** Uninstall, but only with the user's explicit yes. */
+    private suspend fun uninstallExtension(packageName: String): String {
+        if (!extensionManager.isInstalled(packageName)) {
+            return "A extensão \"$packageName\" não está instalada."
+        }
+        val label = extensionManager.installedBrief()
+            .firstOrNull { it.second == packageName }
+            ?.first
+            ?: packageName
+        _pendingAction.value = PendingAction(
+            id = System.currentTimeMillis(),
+            packageName = packageName,
+            label = label,
+            sourceCount = 0,
+        )
+        val allowed = awaitDecision()
+        if (!allowed) {
+            _pendingAction.value = null
+            return "O usuário não confirmou a remoção de $label. Nada foi desinstalado."
+        }
+        return when (val outcome = extensionManager.uninstall(packageName)) {
+            is ExtensionManager.UninstallOutcome.Done ->
+                "$label removida" +
+                    if (outcome.cleanedSources > 0) {
+                        " junto com as configurações de ${outcome.cleanedSources} fonte(s)."
+                    } else {
+                        "."
+                    }
+            is ExtensionManager.UninstallOutcome.Cancelled ->
+                "O usuário não confirmou a remoção de $label. Nada foi desinstalado."
+            is ExtensionManager.UninstallOutcome.Failed ->
+                "Não foi possível remover $label: ${outcome.message}"
+        }.also { _pendingAction.value = null }
+    }
+
+    private suspend fun findInCatalog(packageName: String) = withContext(Dispatchers.IO) {
+        // `for`, não `mapNotNull`: as lambras de Sequence não são inline, e
+        // fetchIndex é suspend.
+        for (repo in extensionRepoStore.currentRepos()) {
+            val index = runCatching { extensionRepo.fetchIndex(repo.indexUrl) }.getOrNull() ?: continue
+            val match = index.firstOrNull { it.packageName == packageName && !it.isPlaceholder() }
+            if (match != null) return@withContext match
+        }
+        null
     }
 
     private suspend fun searchAllWithStats(
@@ -201,20 +403,18 @@ class AgentTools(
     }
 
     /**
-     * Fontes que acabaram de falhar (rede/ISP) entram em cooldown: evita
-     * que toda tool repita o timeout do mesmo host bloqueado.
+     * Fontes que falharam (rede/ISP) entram em cooldown, e a contagem é
+     * compartilhada com as telas de busca: uma fonte que o assistente aprendeu
+     * a evitar não precisa ser redescoberta pelo usuário numa busca.
      */
-    private fun isSourceCoolingDown(sourceId: Long): Boolean {
-        val at = sourceFailures[sourceId] ?: return false
-        return System.currentTimeMillis() - at < SOURCE_COOLDOWN_MS
-    }
+    private fun isSourceCoolingDown(sourceId: Long): Boolean = health.isCoolingDown(sourceId)
 
-    private fun markSourceFailed(sourceId: Long) {
-        sourceFailures[sourceId] = System.currentTimeMillis()
+    private fun markSourceFailed(sourceId: Long, message: String? = null) {
+        health.recordFailure(sourceId, message)
     }
 
     private fun markSourceOk(sourceId: Long) {
-        sourceFailures.remove(sourceId)
+        health.recordSuccess(sourceId)
     }
 
     private suspend fun refineHit(
@@ -282,7 +482,11 @@ class AgentTools(
         val candidates = queries.flatMap { findHits(it, 3) }
             .distinctBy { it.sourceId to it.url }
         if (candidates.isEmpty()) return null
-        return candidates.maxByOrNull { scoreMatch(it.title, query) }
+        // Sem piso de relevância, o "melhor" entre resultados que não têm
+        // nada a ver com a busca vira um card no chat — foi assim que um
+        // mangá aleatório apareceu ao lado de uma lista de extensões.
+        val best = candidates.maxByOrNull { scoreMatch(it.title, query) } ?: return null
+        return best.takeIf { scoreMatch(it.title, query) >= MIN_MATCH_SCORE }
     }
 
     /**
@@ -340,18 +544,32 @@ class AgentTools(
      * so recommendations are tappable even when the model answers from its
      * own knowledge instead of calling `search_manga`.
      */
+    /**
+     * Titles worth looking up in the sources. Empty when the answer is not a
+     * manga list (an extension answer, for instance), so the caller can skip
+     * the lookup instead of announcing it and finding nothing.
+     */
+    fun hasMangaCandidates(text: String): Boolean = extractCandidateTitles(text).isNotEmpty()
+
     suspend fun resolveTitlesFrom(text: String, limit: Int = 6): List<MangaHit> {
         val candidates = extractCandidateTitles(text).take(limit)
         if (candidates.isEmpty()) return emptyList()
-        return supervisorScope {
-            val semaphore = Semaphore(3)
-            candidates.map { title ->
-                async { semaphore.withPermit { findTopHit(title) } }
-            }.awaitAll().filterNotNull()
-                .distinctBy { it.sourceId to it.url }
-                .sortedBy { hit -> candidates.indexOfFirst { sameTitle(it, hit.title) }.takeIf { i -> i >= 0 } ?: Int.MAX_VALUE }
-                .take(limit)
-        }
+        // Teto total: isto roda DEPOIS da resposta já estar na tela, então um
+        // travamento aqui deixa o chat girando sem nenhuma pista do motivo.
+        return withTimeoutOrNull(RESOLVE_TITLES_MS) {
+            supervisorScope {
+                val semaphore = Semaphore(3)
+                candidates.map { title ->
+                    async { semaphore.withPermit { findTopHit(title) } }
+                }.awaitAll().filterNotNull()
+                    .distinctBy { it.sourceId to it.url }
+                    .sortedBy { hit ->
+                        candidates.indexOfFirst { sameTitle(it, hit.title) }.takeIf { i -> i >= 0 }
+                            ?: Int.MAX_VALUE
+                    }
+                    .take(limit)
+            }
+        }.orEmpty()
     }
 
     private fun sameTitle(a: String, b: String): Boolean {
@@ -376,7 +594,20 @@ class AgentTools(
                     .trim().trim('"', '\'', '*', '.', ',', ';')
             }
             .filter { it.length in 3..80 }
+            // Entradas de extensão não são títulos de mangá: procurar "Comikey"
+            // nas fontes só traz card irrelevante para o chat.
+            .filterNot { looksLikeExtensionEntry(it) }
             .distinct()
+    }
+
+    /** `1. Comikey [en/es] (v1.6.11)`, `package=eu.kanade…`, `…, não instalada`. */
+    private fun looksLikeExtensionEntry(candidate: String): Boolean {
+        if (Regex("""\(?v\d+\.\d+""").containsMatchIn(candidate)) return true
+        if (candidate.contains("package=", ignoreCase = true)) return true
+        if (Regex("""\[[a-z]{2}([/-][a-z]{2,4})*]""").containsMatchIn(candidate)) return true
+        val words = candidate.lowercase()
+        return listOf("extensão", "extensao", "instalad", "desinstalad", "apk")
+            .any { it in words }
     }
 
     private fun scoreMatch(candidate: String, want: String): Int {
@@ -399,6 +630,19 @@ class AgentTools(
         private const val SEARCH_TIMEOUT_MS = 8_000L
         private const val SOURCE_COOLDOWN_MS = 300_000L
 
+        /** Sem resposta do usuário = desinstalação negada. */
+        private const val CONFIRM_TIMEOUT_MS = 120_000L
+
+        /** Teto da resolução de títulos citados (roda com a resposta na tela). */
+        private const val RESOLVE_TITLES_MS = 12_000L
+
+        /**
+         * Piso de relevância para virar card: exige nome igual, OU um contendo
+         * o outro (5 pontos), OU palavras em comum. Sem isso, qualquer busca
+         * devolvia "o melhor entre irrelevantes".
+         */
+        private const val MIN_MATCH_SCORE = 4
+
         const val SYSTEM_PROMPT = "Você é o assistente do app de leitura de mangás. " +
             "Responda sempre em português. Use a ferramenta search_manga para qualquer " +
             "pedido de busca, recomendação ou filtragem. Ela aceita status " +
@@ -408,6 +652,12 @@ class AgentTools(
             "Para pedidos baseados na biblioteca: chame list_favorites UMA vez, " +
             "depois no máximo 2 search_manga, e responda — nunca repita a mesma " +
             "chamada. " +
+            "Extensões (fontes): para instalar, SEMPRE chame search_extensions antes e " +
+            "depois install_extension com o packageName EXATO que veio da busca — " +
+            "nunca invente o pacote, e nunca peça URL de APK. Só instale quando o " +
+            "pedido for explícito (\"instala a fonte X\"). Para desinstalar, use " +
+            "uninstall_extension e avise que o usuário vai receber uma confirmação: " +
+            "se ele recusar, diga que nada foi removido e não tente de novo. " +
             "Numere os resultados a partir de 1 e ao final diga: o usuário pode " +
             "tocar num item para abrir e favoritar, ou pedir \"adiciona o número N\" " +
             "(use add_to_library com o índice). " +
